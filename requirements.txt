@@ -2,3 +2,4 @@ Flask
 langchain
 chromadb
 openai
+langchain-community
