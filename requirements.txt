@@ -3,3 +3,4 @@ langchain
 chromadb
 openai
 langchain-community
+langchain-openai
