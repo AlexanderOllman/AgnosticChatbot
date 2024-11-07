@@ -26,14 +26,29 @@ def upload():
     if not file or not embeddings_model_url:
         return jsonify({'error': 'File and Embeddings Model URL are required'}), 400
     
-    # Save uploaded file
-    filepath = os.path.join(CHROMADB_DIR, file.filename)
-    file.save(filepath)
+    # Get available models from the endpoint
+    try:
+        models_url = f"{embeddings_model_url.rstrip('/')}/v1/models"
+        response = requests.get(models_url)
+        response.raise_for_status()
+        models = response.json().get('data', [])
+        model_name = models[0]['id'] if models else "custom-model"
+    except Exception as e:
+        # Fallback to default if models endpoint fails
+        model_name = "custom-model"
     
     # Initialize ChromaDB if not exists
     if chroma_db is None:
-        embeddings = OpenAIEmbeddings(model=embeddings_model_url)
+        embeddings = OpenAIEmbeddings(
+            model=model_name,
+            openai_api_key="not-needed",
+            openai_api_base=embeddings_model_url
+        )
         chroma_db = Chroma(embedding_function=embeddings, persist_directory=CHROMADB_DIR)
+    
+    # Save uploaded file
+    filepath = os.path.join(CHROMADB_DIR, file.filename)
+    file.save(filepath)
     
     # Add documents
     with open(filepath, 'r') as f:
