@@ -1,163 +1,178 @@
-from flask import Flask, render_template, request, jsonify
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain.chains import RetrievalQA
-from langchain_openai import ChatOpenAI
 import os
-import tempfile
+import sqlite3
+from flask import Flask, request, render_template, redirect, url_for, session
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
 import requests
-from langchain_community.document_loaders import PyPDFLoader
 
 app = Flask(__name__)
+app.secret_key = 'your_secret_key_here'  # Replace with a secure key in production.
 
-# Global variables
-CHROMADB_DIR = os.path.join(os.getcwd(), 'chromadb')
-chroma_db = None
+DATABASE = 'conversations.db'
 
-def init_chromadb(embeddings_url=None):
-    """Initialize or load existing ChromaDB"""
-    global chroma_db
-    
-    # Check if directory exists
-    if not os.path.exists(CHROMADB_DIR):
-        os.makedirs(CHROMADB_DIR)
-    
-    # If embeddings_url is provided, initialize with new embeddings
-    if embeddings_url:
-        try:
-            models_url = f"{embeddings_url.rstrip('/')}/v1/models"
-            response = requests.get(models_url)
-            response.raise_for_status()
-            models = response.json().get('data', [])
-            model_name = models[0]['id'] if models else "custom-model"
-            
-            embeddings = OpenAIEmbeddings(
-                model=model_name,
-                openai_api_key="not-needed",
-                openai_api_base=embeddings_url
-            )
-            chroma_db = Chroma(embedding_function=embeddings, persist_directory=CHROMADB_DIR)
-            return True
-        except Exception as e:
-            print(f"Error initializing ChromaDB: {str(e)}")
-            return False
-    
-    return False
+def init_db():
+    if not os.path.exists(DATABASE):
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+        conn.close()
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+init_db()
 
-@app.route('/upload', methods=['POST'])
-def upload():
-    global chroma_db
-    
-    # Validate request contains required files/data
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-        
-    if 'embeddings_model' not in request.form:
-        return jsonify({'error': 'Embeddings Model URL is required'}), 400
-        
-    embeddings_model_url = request.form['embeddings_model'].strip()
-    
-    # Validate file type
-    if not file.filename.lower().endswith('.pdf'):
-        return jsonify({'error': 'Only PDF files are supported'}), 400
-    
-    # Validate URL format
-    if not embeddings_model_url.startswith(('http://', 'https://')):
-        return jsonify({'error': 'Invalid Embeddings Model URL format'}), 400
-    
-    # Initialize ChromaDB if not exists
-    if chroma_db is None:
-        if not init_chromadb(embeddings_model_url):
-            return jsonify({'error': 'Failed to initialize ChromaDB. Please check the embeddings endpoint.'}), 500
-    
-    # Save uploaded file to temporary location
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            file.save(temp_file.name)
-            
-            # Verify file is not empty
-            if os.path.getsize(temp_file.name) == 0:
-                os.unlink(temp_file.name)
-                return jsonify({'error': 'Uploaded file is empty'}), 400
-            
-            # Load and split PDF
-            try:
-                loader = PyPDFLoader(temp_file.name)
-                pages = loader.load_and_split()
-                
-                if not pages:
-                    return jsonify({'error': 'No content could be extracted from the PDF'}), 400
-                
-                # Extract text from pages and add to ChromaDB
-                texts = [page.page_content for page in pages if page.page_content.strip()]
-                
-                if not texts:
-                    return jsonify({'error': 'No valid text content found in PDF'}), 400
-                
-                chroma_db.add_texts(texts)
-                
-                return jsonify({
-                    'message': f'PDF processed successfully. Added {len(texts)} pages to the database.',
-                    'pages_processed': len(texts)
-                })
-                
-            except Exception as e:
-                return jsonify({'error': f'Error processing PDF: {str(e)}'}), 500
-            
-    except Exception as e:
-        return jsonify({'error': f'Error handling file upload: {str(e)}'}), 500
-        
-    finally:
-        # Ensure temporary file is always cleaned up
-        if 'temp_file' in locals():
-            try:
-                os.unlink(temp_file.name)
-            except Exception:
-                pass
+def get_conversation():
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM conversations ORDER BY id ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
-@app.route('/chat', methods=['POST'])
+def add_message(role, content):
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("INSERT INTO conversations (role, content) VALUES (?,?)", (role, content))
+    conn.commit()
+    conn.close()
+
+@app.route('/', methods=['GET', 'POST'])
 def chat():
-    if chroma_db is None:
-        return jsonify({'error': 'No documents have been uploaded yet'}), 400
-    
-    user_message = request.json['message']
-    llm_url = request.json['llm']
-    
-    if not llm_url or 'http' not in llm_url:
-        return jsonify({'error': 'Valid LLM URL is required'}), 400
-    
-    # Get available models from the endpoint
-    try:
-        models_url = f"{llm_url.rstrip('/')}/v1/models"
-        response = requests.get(models_url)
-        response.raise_for_status()
-        models = response.json().get('data', [])
-        model_name = models[0]['id'] if models else "custom-model"
-    except Exception as e:
-        # Fallback to default if models endpoint fails
-        model_name = "custom-model"
-    
-    llm = ChatOpenAI(
-        model_name=model_name,
-        openai_api_key="not-needed",
-        openai_api_base=llm_url
-    )
-    retriever = chroma_db.as_retriever()
-    qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)
-    
-    response = qa_chain.run(user_message)
-    return jsonify({'response': response})
+    # Retrieve settings from session or use defaults
+    base_url = session.get('llm_base_url', "https://llama-test-predictor-global-models.beta.hpepcai.com/v1")
+    model = session.get('llm_model', "meta/llama3-8b-instruct")
+    api_key = session.get('llm_api_key', "1234")
+    vector_db_url = session.get('vector_db_url', "")
+
+    if request.method == 'POST':
+        user_message = request.form.get('message')
+        use_vector_db = request.form.get('use_vector_db') == 'on'
+
+        if user_message.strip():
+            # Add user message to DB
+            add_message('user', user_message)
+
+            # If enabled, retrieve context from vector DB
+            context = ""
+            if use_vector_db and vector_db_url:
+                # Perform retrieval
+                retrieve_endpoint = f"{vector_db_url}/retrieve"
+                params = {'query': user_message, 'top_k': 5}
+                try:
+                    r = requests.get(retrieve_endpoint, params=params)
+                    if r.status_code == 200:
+                        retrieved_docs = r.json().get('docs', [])
+                        # Combine retrieved text into a context prompt
+                        context = "\n\n".join([doc.get('content', '') for doc in retrieved_docs])
+                except Exception as e:
+                    print(f"Error during retrieval: {e}")
+
+            # Construct final prompt
+            prompt = user_message
+            if context:
+                prompt = f"Use the following context to answer:\n{context}\n\nUser: {user_message}"
+
+            # Invoke the LLM
+            llm = ChatNVIDIA(base_url=base_url, model=model, api_key=api_key)
+            try:
+                llm_response = llm.invoke(prompt)
+            except Exception as e:
+                llm_response = f"Error calling LLM: {e}"
+
+            # Add assistant message to DB
+            add_message('assistant', llm_response)
+
+        return redirect(url_for('chat'))
+
+    # Render chat UI
+    conversation = get_conversation()
+    return render_template('chat.html', conversation=conversation)
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    if request.method == 'POST':
+        llm_base_url = request.form.get('llm_base_url')
+        llm_model = request.form.get('llm_model')
+        llm_api_key = request.form.get('llm_api_key')
+        vector_db_url = request.form.get('vector_db_url')
+
+        session['llm_base_url'] = llm_base_url
+        session['llm_model'] = llm_model
+        session['llm_api_key'] = llm_api_key
+        session['vector_db_url'] = vector_db_url
+
+        return redirect(url_for('settings'))
+
+    # Render settings form
+    return render_template('settings.html',
+                           llm_base_url=session.get('llm_base_url', ''),
+                           llm_model=session.get('llm_model', ''),
+                           llm_api_key=session.get('llm_api_key', ''),
+                           vector_db_url=session.get('vector_db_url', ''))
+
+@app.route('/upload', methods=['GET','POST'])
+def upload():
+    # This route remains as a simple single-file upload (if desired)
+    if request.method == 'POST':
+        file = request.files.get('file')
+        vector_db_url = session.get('vector_db_url', "")
+        if file and vector_db_url:
+            upload_endpoint = f"{vector_db_url}/add"
+            files = {'file': (file.filename, file.read())}
+            try:
+                r = requests.post(upload_endpoint, files=files)
+                if r.status_code == 200:
+                    return "File uploaded successfully!"
+                else:
+                    return f"Error uploading file: {r.text}", 400
+            except Exception as e:
+                return f"Exception during upload: {e}", 400
+        else:
+            return "No file or vector DB URL configured.", 400
+
+    return '''
+    <form method="post" enctype="multipart/form-data">
+        <input type="file" name="file"/><br><br>
+        <input type="submit" value="Upload to Vector DB"/>
+    </form>
+    '''
+
+@app.route('/add_files', methods=['POST'])
+def add_files():
+    vector_db_url = session.get('vector_db_url', "")
+    if not vector_db_url:
+        return "Vector DB URL not configured.", 400
+
+    # Get the list of uploaded files
+    uploaded_files = request.files.getlist('files')
+    if not uploaded_files:
+        return "No files provided.", 400
+
+    results = []
+    for file in uploaded_files:
+        if file.filename:
+            upload_endpoint = f"{vector_db_url}/add"
+            files = {'file': (file.filename, file.read())}
+            try:
+                r = requests.post(upload_endpoint, files=files)
+                if r.status_code == 200:
+                    results.append(f"{file.filename}: uploaded successfully")
+                else:
+                    results.append(f"{file.filename}: Error uploading file - {r.text}")
+            except Exception as e:
+                results.append(f"{file.filename}: Exception during upload - {e}")
+
+    # After uploading, redirect back to settings
+    session['upload_results'] = results
+    return redirect(url_for('settings'))
+
+@app.route('/clear_results', methods=['POST'])
+def clear_results():
+    session.pop('upload_results', None)
+    return redirect(url_for('settings'))
 
 if __name__ == '__main__':
-    # Create ChromaDB directory if it doesn't exist
-    if not os.path.exists(CHROMADB_DIR):
-        os.makedirs(CHROMADB_DIR)
-    app.run(debug=True, host='0.0.0.0', port='8080')
+    app.run(app, debug=True, host='0.0.0.0', port='8080')

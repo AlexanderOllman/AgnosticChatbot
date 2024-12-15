@@ -1,7 +1,8 @@
 Flask
+requests 
 langchain
-chromadb
-openai
+langchain-nvidia-ai-endpoints
 langchain-community
 langchain-openai
-pypdf
+
+

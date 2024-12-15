@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Settings</title>
+<style>
+body {
+    font-family: Arial, sans-serif;
+    margin: 20px;
+}
+.settings-container {
+    max-width: 600px;
+    margin: 0 auto;
+}
+label {
+    display: block;
+    margin-top: 10px;
+    margin-bottom: 5px;
+}
+input[type="text"] {
+    width: 100%;
+}
+</style>
+</head>
+<body>
+<div class="settings-container">
+    <h1>Settings</h1>
+    <form method="POST">
+        <label for="llm_base_url">LLM Base URL:</label>
+        <input type="text" name="llm_base_url" id="llm_base_url" value="{{ llm_base_url }}" />
+
+        <label for="llm_model">LLM Model:</label>
+        <input type="text" name="llm_model" id="llm_model" value="{{ llm_model }}" />
+
+        <label for="llm_api_key">LLM API Key:</label>
+        <input type="text" name="llm_api_key" id="llm_api_key" value="{{ llm_api_key }}" />
+
+        <label for="vector_db_url">Vector DB Service URL:</label>
+        <input type="text" name="vector_db_url" id="vector_db_url" value="{{ vector_db_url }}" />
+
+        <br><br>
+        <input type="submit" value="Save" />
+    </form>
+</div>
+</body>
+</html>
